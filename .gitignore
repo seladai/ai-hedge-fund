@@ -67,3 +67,8 @@ outputs/
 
 # Alembic (keep migration files, but ignore generated/cache files)
 app/backend/alembic/versions/__pycache__/
+
+# Local data-provider cache + generated audit artifacts (regenerable, not source)
+provider_cache.db*
+provider_audit_detail.csv
+provider_audit_report.md

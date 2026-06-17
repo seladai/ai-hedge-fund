@@ -50,7 +50,7 @@ def run_hedge_fund(
     portfolio: dict,
     show_reasoning: bool = False,
     selected_analysts: list[str] = [],
-    model_name: str = "gpt-4.1",
+    model_name: str = "gpt-5.4",
     model_provider: str = "OpenAI",
 ):
     # Start progress tracking
@@ -130,6 +130,82 @@ def create_workflow(selected_analysts=None):
     return workflow
 
 
+def save_run_analysis(result: dict, inputs, tickers: list[str]) -> None:
+    """Persist each agent verdict + run/data metadata to provider_cache.db."""
+    import json
+    import os
+    import uuid
+    import datetime as _dt
+
+    from src.tools.providers.cache_db import save_analysis_run
+    from src.tools.api import search_line_items, get_market_cap
+    from src.agents.warren_buffett import calculate_intrinsic_value
+
+    items_needed = [
+        "capital_expenditure", "depreciation_and_amortization", "net_income",
+        "outstanding_shares", "total_assets", "total_liabilities",
+        "shareholders_equity", "revenue", "free_cash_flow",
+    ]
+    run_id = uuid.uuid4().hex[:12]
+    run_time = _dt.datetime.now().isoformat(timespec="seconds")
+    data_provider = os.environ.get("DATA_PROVIDER", "financialdatasets")
+    decisions = result.get("decisions") or {}
+
+    # Per-ticker data context (served from cache, so this is cheap and adds no network).
+    ctx: dict[str, dict] = {}
+    for t in tickers:
+        try:
+            items = search_line_items(t, items_needed, inputs.end_date, "ttm", 10)
+            mc = get_market_cap(t, inputs.end_date)
+            iv = calculate_intrinsic_value(items).get("intrinsic_value") if items else None
+            mos = (iv - mc) / mc if (iv and mc) else None
+            ctx[t] = {
+                "intrinsic_value": iv, "market_cap": mc, "margin_of_safety": mos,
+                "data_as_of": items[0].report_period if items else None,
+                "data_periods": len(items),
+                "period_basis": items[0].period if items else None,  # annual / quarterly / ttm
+            }
+        except Exception:
+            ctx[t] = {}
+
+    rows = []
+    for agent_id, sigs in (result.get("analyst_signals") or {}).items():
+        for t, s in sigs.items():
+            # Only persist actual analyst verdicts (skip risk/portfolio bookkeeping entries).
+            if not isinstance(s, dict) or "signal" not in s:
+                continue
+            reasoning = s.get("reasoning")
+            if reasoning is not None and not isinstance(reasoning, str):
+                reasoning = json.dumps(reasoning, default=str)
+            try:
+                confidence = float(s["confidence"]) if s.get("confidence") is not None else None
+            except (TypeError, ValueError):
+                confidence = None
+            c = ctx.get(t, {})
+            rows.append({
+                "run_id": run_id, "ticker": t, "agent": agent_id,
+                "signal": s.get("signal"), "confidence": confidence,
+                "reasoning": reasoning,
+                "intrinsic_value": c.get("intrinsic_value"), "market_cap": c.get("market_cap"),
+                "margin_of_safety": c.get("margin_of_safety"),
+                "data_as_of": c.get("data_as_of"), "data_periods": c.get("data_periods"),
+                "period_basis": c.get("period_basis"), "data_provider": data_provider,
+                "run_time": run_time,
+                "metadata": json.dumps({"decision": decisions.get(t)}),
+            })
+
+    basis = next((c.get("period_basis") for c in ctx.values() if c.get("period_basis")), None)
+    run_meta = {
+        "run_id": run_id, "run_time": run_time, "tickers": tickers,
+        "agents": inputs.selected_analysts, "model": inputs.model_name,
+        "model_provider": inputs.model_provider, "data_provider": data_provider,
+        "period_basis": basis, "start_date": inputs.start_date, "end_date": inputs.end_date,
+    }
+    save_analysis_run(run_meta, rows)
+    print(f"\n\U0001F4C1 Saved {len(rows)} verdict(s) to provider_cache.db "
+          f"(run_id={run_id}, provider={data_provider}, basis={basis})")
+
+
 if __name__ == "__main__":
     inputs = parse_cli_inputs(
         description="Run the hedge fund trading system",
@@ -177,3 +253,9 @@ if __name__ == "__main__":
         model_provider=inputs.model_provider,
     )
     print_trading_output(result)
+
+    if getattr(inputs, "save_analysis", True):
+        try:
+            save_run_analysis(result, inputs, tickers)
+        except Exception as e:
+            print(f"(warning: could not save analysis to db: {e})")

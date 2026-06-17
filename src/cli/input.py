@@ -1,3 +1,4 @@
+import os
 import sys
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -107,6 +108,11 @@ def select_analysts(flags: dict | None = None) -> list[str]:
 def select_model(use_ollama: bool, model_flag: str | None = None) -> tuple[str, str]:
     model_name: str = ""
     model_provider: str | None = None
+
+    # Default model when none is given on the CLI (avoids the interactive picker).
+    # Override per-run with --model, or globally via DEFAULT_MODEL in the environment.
+    if not model_flag and not use_ollama:
+        model_flag = os.environ.get("DEFAULT_MODEL", "gpt-5.4")
 
     if model_flag:
         model = find_model_by_name(model_flag)
@@ -223,6 +229,7 @@ class CLIInputs:
     margin_requirement: float
     show_reasoning: bool = False
     show_agent_graph: bool = False
+    save_analysis: bool = True
     raw_args: Optional[argparse.Namespace] = None
 
 
@@ -257,6 +264,11 @@ def parse_cli_inputs(
         help="Initial margin requirement ratio for shorts (e.g., 0.5 for 50%%). Defaults to 0.0",
     )
 
+    parser.add_argument(
+        "--save-analysis", action=argparse.BooleanOptionalAction, default=True,
+        help="Save each run's verdicts + metadata to provider_cache.db (default: on; use --no-save-analysis to disable)",
+    )
+
     if include_reasoning_flag:
         parser.add_argument("--show-reasoning", action="store_true", help="Show reasoning from each agent")
     if include_graph_flag:
@@ -284,6 +296,7 @@ def parse_cli_inputs(
         margin_requirement=getattr(args, "margin_requirement", 0.0),
         show_reasoning=getattr(args, "show_reasoning", False),
         show_agent_graph=getattr(args, "show_agent_graph", False),
+        save_analysis=getattr(args, "save_analysis", True),
         raw_args=args,
     )
 
